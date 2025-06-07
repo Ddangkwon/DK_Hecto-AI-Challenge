@@ -1,10 +1,12 @@
-import pandas as pd
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.preprocessing import image
 import os
 from glob import glob
 import json
+
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tqdm import tqdm
+from tensorflow.keras.preprocessing import image
 
 # 모델 로드
 model = tf.keras.models.load_model("car_model_classifier.h5")
@@ -23,7 +25,7 @@ image_paths = sorted(glob(os.path.join(TEST_DIR, "*.jpg")))  # 정렬은 ID 순�
 results = []
 
 # 예측 반복
-for path in image_paths:
+for path in tqdm(image_paths, desc="이미지 예측 중"):
     img = image.load_img(path, target_size=(224, 224))
     x = image.img_to_array(img)
     x = np.expand_dims(x, axis=0) / 255.0
@@ -33,6 +35,7 @@ for path in image_paths:
     one_hot[np.argmax(pred)] = 1.0
 
     results.append([os.path.splitext(os.path.basename(path))[0]] + one_hot.tolist())
+
 
 # 결과 저장
 df = pd.DataFrame(results, columns=["ID"] + class_list)

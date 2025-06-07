@@ -3,19 +3,25 @@ import os
 import threading
 import subprocess
 import time
+import gc
 
 import tensorflow as tf
 from tensorflow.python.client import device_lib  # 로컬 디바이스 정보 출력용
 from tensorflow.keras.preprocessing.image import ImageDataGenerator  # 이미지 전처리 및 증강
-from tensorflow.keras.applications import ResNet50  # 사전 학습된 ResNet50 불러오기
+from tensorflow.keras.applications import ResNet50, ConvNeXtBase, EfficientNetV2S  # 사전 학습된 ResNet50, ConvNeXtBase EfficientNetV2S 불러오기
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D  # 레이어 구성 요소
 from tensorflow.keras.optimizers import Adam  # 옵티마이저
+from tensorflow.keras.optimizers.experimental import AdamW
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.models import load_model
+from tensorflow.keras.callbacks import ReduceLROnPlateau
 # -----------------------------
 # GPU 설정 및 확인
 # -----------------------------
+# 메모리 클리어
+gc.collect()
+tf.keras.backend.clear_session()
 
 # 사용 가능한 GPU 수 확인
 print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
@@ -35,7 +41,6 @@ if gpus:
 print("Specific Resource Information :", device_lib.list_local_devices())
 
 
-
 def monitor_gpu(interval=600):
     """ 일정 시간 간격으로 GPU 사용 상태를 출력하는 함수 """
     while True:
@@ -43,8 +48,9 @@ def monitor_gpu(interval=600):
         print(result.stdout)
         time.sleep(interval)
 
-# GPU 모니터링 쓰레드 실행
-monitor_thread = threading.Thread(target=monitor_gpu, args=(10,), daemon=True)
+
+# GPU 모니터링 쓰레드 실행 (한시간 단위 출력)
+monitor_thread = threading.Thread(target=monitor_gpu, args=(3600,), daemon=True)
 monitor_thread.start()
 
 # -----------------------------
@@ -55,10 +61,10 @@ monitor_thread.start()
 input_size = (224, 224)
 
 # 학습 시 한 번에 처리할 이미지 수
-batch_size = 32
+batch_size = 16
 
 # 전체 학습 반복 횟수 (epoch)
-epochs = 1
+epochs = 5
 
 # 학습/검증 데이터 경로 설정
 train_dir = "open/train"  # 클래스별 폴더가 포함된 학습 이미지 디렉토리
@@ -108,8 +114,15 @@ if os.path.exists(MODEL_PATH):
     model = load_model(MODEL_PATH)
 else:
     # 사전 학습된 ResNet50을 feature extractor로 사용 (분류기 제거)
-    base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+    # base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
 
+    # ResNet의 구조를 개선한 최신 CNN 계열 아키텍처
+    # base_model = ConvNeXtBase(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+
+    # EfficientNetV2-S는 Google이 설계한 경량 고성능 CNN 모델로, 빠른 학습 속도와 높은 정확도를 동시에 제공하는 이미지 분류용 네트워크
+    base_model = EfficientNetV2S(include_top=False, input_shape=(224, 224, 3), weights='imagenet')\
+
+    base_model.trainable = True
     # ResNet50의 출력 feature map을 global average pooling (벡터로 축소)
     x = base_model.output
     x = GlobalAveragePooling2D()(x)
@@ -131,11 +144,9 @@ else:
 # 손실 함수: categorical_crossentropy (다중 클래스 분류용)
 # 옵티마이저: Adam (학습률 1e-4로 설정)
 # 평가지표: accuracy
-model.compile(
-    optimizer=Adam(1e-4),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
+model.compile(optimizer=AdamW(learning_rate=1e-4, weight_decay=1e-5),
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
 
 # 학습 시작: 학습 데이터와 검증 데이터 사용
 checkpoint_cb = ModelCheckpoint(
@@ -145,11 +156,20 @@ checkpoint_cb = ModelCheckpoint(
     verbose=1
 )
 
+# val_loss가 2번 연속 줄어들지 않으면 학습률을 0.5배 감소
+reduce_lr_cb = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,
+    patience=2,
+    verbose=1,
+    min_lr=1e-6
+)
+
 model.fit(
     train_generator,
     validation_data=val_generator,
     epochs=epochs,
-    callbacks=[checkpoint_cb]
+    callbacks=[checkpoint_cb, reduce_lr_cb]
 )
 
 # -----------------------------
@@ -157,6 +177,10 @@ model.fit(
 # -----------------------------
 model.save('car_model_classifier.h5')
 print("모델이 car_model_classifier.h5 파일로 저장되었습니다.")
+
+# 메모리 클리어
+gc.collect()
+tf.keras.backend.clear_session()
 
 # -----------------------------
 # 클래스 인덱스 저장 (예측 시 라벨명 복원용)
